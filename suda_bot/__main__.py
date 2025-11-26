@@ -5,6 +5,7 @@ from suda_bot.middleware import DatabaseSessionMiddleware
 from suda_bot.handlers import user_router, barista_router
 from suda_bot.database import init_db
 from suda_bot.config import TELEGRAM_BOT_TOKEN
+from suda_bot.scheduler import setup_scheduler
 
 async def main():
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -19,6 +20,9 @@ async def main():
     dp.include_router(barista_router)
 
     await init_db()
+
+    # Запускаем планировщик
+    setup_scheduler(async_session)
 
     await dp.start_polling(bot)
 
