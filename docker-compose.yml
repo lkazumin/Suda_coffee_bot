@@ -5,12 +5,12 @@ services:
     image: postgres:15
     environment:
       POSTGRES_DB: coffee_bot_db
-      POSTGRES_USER: ura_suda
-      POSTGRES_PASSWORD: 9zUumXR45J
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
 
   bot:
     build: .
