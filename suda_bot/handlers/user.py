@@ -1,4 +1,4 @@
-from aiogram import Router, F, types  # ✅ Добавлен `types`
+from aiogram import Router, F, types
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
@@ -22,9 +22,9 @@ class Registration(StatesGroup):
 # --- Клавиатуры ---
 def welcome_keyboard():
     kb = [
-        [InlineKeyboardButton(text="Начать регистрацию", callback_data="start_registration")]  # ✅ Inline кнопка
+        [InlineKeyboardButton(text="Начать регистрацию", callback_data="start_registration")]
     ]
-    return InlineKeyboardMarkup(inline_keyboard=kb)  # ✅ Inline клавиатура
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def request_phone_keyboard():
     kb = [
@@ -63,7 +63,7 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
         "Добро пожаловать в кофейню “Сюда”! ☕️\n\n"
         "За каждые 7 посещений вы можете получить 8-й напиток в подарок!\n"
         "Каждый день мы готовим для вас не только вкусный кофе, но и уникальный промокод — просто загляните к нам и введите его в боте, чтобы получить 1 очко и приблизиться к вашему бесплатному напитку!",
-        reply_markup=welcome_keyboard()  # ✅ Кнопка "Начать регистрацию" под сообщением
+        reply_markup=welcome_keyboard()
     )
 
 # --- Обработка нажатия inline-кнопки ---
@@ -71,7 +71,7 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
 async def start_registration_callback(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.answer("Введите ваше имя:")
     await state.set_state(Registration.waiting_for_first_name)
-    await callback_query.answer()  # ✅ Ответ на callback
+    await callback_query.answer()
 
 @user_router.message(Registration.waiting_for_first_name)
 async def process_first_name(message: Message, state: FSMContext):
@@ -139,7 +139,7 @@ async def process_phone_from_contact(message: Message, session: AsyncSession, st
     await state.clear()
 
     await message.answer(
-        "✅ Регистрация завершена!",
+        "Регистрация завершена!",
         reply_markup=main_menu_keyboard()
     )
 
@@ -199,7 +199,7 @@ async def request_code(message: Message, session: AsyncSession):
             print(f"Failed to send message to barista {barista_id}: {e}")
             pass
 
-    await message.answer("Ваш запрос на код отправлен бариста. Скажите ему свою фамилию. \n Отправьте код в чат без лишних символов:")
+    await message.answer("Ваш запрос на код отправлен бариста. Скажите ему свою фамилию.\nОтправьте код в чат без лишних символов:")
 
 @user_router.message(F.text == "Моя скидка")
 async def show_discount(message: Message, session: AsyncSession):
