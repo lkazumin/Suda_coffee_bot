@@ -1,5 +1,5 @@
-from aiogram import Router, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram import Router, F, types  # ✅ Добавлен `types`
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -15,10 +15,23 @@ user_router = Router()
 
 # --- FSM ---
 class Registration(StatesGroup):
-    waiting_for_full_name = State()
+    waiting_for_first_name = State()
+    waiting_for_last_name = State()
     waiting_for_phone = State()
 
 # --- Клавиатуры ---
+def welcome_keyboard():
+    kb = [
+        [InlineKeyboardButton(text="Начать регистрацию", callback_data="start_registration")]  # ✅ Inline кнопка
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)  # ✅ Inline клавиатура
+
+def request_phone_keyboard():
+    kb = [
+        [KeyboardButton(text="Отправить номер", request_contact=True)]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True, one_time_keyboard=True)
+
 def main_menu_keyboard():
     kb = [
         [KeyboardButton(text="Получить код")],
@@ -45,41 +58,74 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
         await message.answer("Добро пожаловать в кофейню “Сюда”! ☕️", reply_markup=main_menu_keyboard())
         return
 
+    # Отправляем приветствие с inline-кнопкой
     await message.answer(
         "Добро пожаловать в кофейню “Сюда”! ☕️\n\n"
         "За каждые 7 посещений вы можете получить 8-й напиток в подарок!\n"
-        "Каждый день мы готовим для вас не только вкусный кофе, но и уникальный промокод — просто загляните к нам и введите его в боте, чтобы получить 1 очко и приблизиться к вашему бесплатному напитку!\n\n"
-        "Введите вашу Фамилию и Имя (например: Иванов Иван) - чтобы начать",
-        reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
+        "Каждый день мы готовим для вас не только вкусный кофе, но и уникальный промокод — просто загляните к нам и введите его в боте, чтобы получить 1 очко и приблизиться к вашему бесплатному напитку!",
+        reply_markup=welcome_keyboard()  # ✅ Кнопка "Начать регистрацию" под сообщением
     )
-    await state.set_state(Registration.waiting_for_full_name)
 
-@user_router.message(Registration.waiting_for_full_name)
-async def process_full_name(message: Message, state: FSMContext):
-    text = message.text.strip()
-    if " " not in text:
-        await message.answer("Введите фамилию и имя через пробел.")
+# --- Обработка нажатия inline-кнопки ---
+@user_router.callback_query(F.data == "start_registration")
+async def start_registration_callback(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.answer("Введите ваше имя:")
+    await state.set_state(Registration.waiting_for_first_name)
+    await callback_query.answer()  # ✅ Ответ на callback
+
+@user_router.message(Registration.waiting_for_first_name)
+async def process_first_name(message: Message, state: FSMContext):
+    first_name = message.text.strip()
+
+    if not first_name:
+        await message.answer("Введите ваше имя.")
         return
 
-    parts = text.split()
-    last_name = parts[0]
-    first_name = parts[1]
+    await state.update_data(first_name=first_name)
+    await message.answer("Введите вашу фамилию:")
+    await state.set_state(Registration.waiting_for_last_name)
 
-    await state.update_data(last_name=last_name, first_name=first_name)
-    await message.answer("Теперь введите ваш номер телефона \n например: 79991234567):")
+@user_router.message(Registration.waiting_for_last_name)
+async def process_last_name(message: Message, state: FSMContext):
+    last_name = message.text.strip()
+
+    if not last_name:
+        await message.answer("Введите вашу фамилию.")
+        return
+
+    await state.update_data(last_name=last_name)
+    await message.answer("Теперь нажмите кнопку ниже, чтобы отправить ваш номер телефона:", reply_markup=request_phone_keyboard())
     await state.set_state(Registration.waiting_for_phone)
 
-@user_router.message(Registration.waiting_for_phone)
-async def process_phone(message: Message, session: AsyncSession, state: FSMContext):
-    phone = message.text.strip()
+@user_router.message(Registration.waiting_for_phone, F.contact)
+async def process_phone_from_contact(message: Message, session: AsyncSession, state: FSMContext):
+    contact = message.contact
 
-    if not phone.isdigit() or len(phone) != 11:
-        await message.answer("Введите 11 цифр номера телефона.")
+    # Проверяем, что контакт принадлежит пользователю
+    if contact.user_id != message.from_user.id:
+        await message.answer("Пожалуйста, отправьте свой номер.")
+        return
+
+    phone = contact.phone_number
+
+    if not phone.isdigit() or len(phone) < 10:
+        await message.answer("Неверный формат номера. Попробуйте снова.")
+        return
+
+    # Приводим к 11-значному формату
+    if phone.startswith('8') and len(phone) == 11:
+        phone = '7' + phone[1:]
+    elif phone.startswith('7') and len(phone) == 11:
+        pass
+    elif phone.startswith('+7') and len(phone) == 12:
+        phone = phone[1:]
+    else:
+        await message.answer("Неверный формат номера. Попробуйте снова.")
         return
 
     data = await state.get_data()
-    last_name = data['last_name']
     first_name = data['first_name']
+    last_name = data['last_name']
 
     new_user = User(
         telegram_id=str(message.from_user.id),
@@ -96,6 +142,10 @@ async def process_phone(message: Message, session: AsyncSession, state: FSMConte
         "✅ Регистрация завершена!",
         reply_markup=main_menu_keyboard()
     )
+
+@user_router.message(Registration.waiting_for_phone)
+async def process_phone_invalid(message: Message):
+    await message.answer("Пожалуйста, нажмите кнопку 'Отправить номер'.")
 
 @user_router.message(F.text == "Получить код")
 async def request_code(message: Message, session: AsyncSession):
@@ -149,7 +199,7 @@ async def request_code(message: Message, session: AsyncSession):
             print(f"Failed to send message to barista {barista_id}: {e}")
             pass
 
-    await message.answer("✅ Ваш запрос на код отправлен бариста. Скажите ему свою фамилию")
+    await message.answer("Ваш запрос на код отправлен бариста. Скажите ему свою фамилию. \n Отправьте код в чат без лишних символов:")
 
 @user_router.message(F.text == "Моя скидка")
 async def show_discount(message: Message, session: AsyncSession):
@@ -196,16 +246,16 @@ async def handle_code_from_client(message: Message, session: AsyncSession):
     )
     db_code = db_code.scalar_one_or_none()
 
+    if user.last_check_in and user.last_check_in.date() == datetime.now().date():
+        await message.answer("Вы уже использовали код сегодня. Приходите завтра!")
+        return
+
     if not db_code:
         await message.answer("Неверный или уже использованный код")
         return
 
     if db_code.user_id != user.id:
         await message.answer("Этот код не принадлежит вам")
-        return
-
-    if user.last_check_in and user.last_check_in.date() == datetime.now().date():
-        await message.answer("Вы уже использовали код сегодня. Приходите завтра!")
         return
 
     # Помечаем код как использованный
