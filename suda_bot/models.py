@@ -21,3 +21,10 @@ class DailyCode(Base):
     user_id = Column(Integer, nullable=False)
     date = Column(DateTime, nullable=False)
     is_used = Column(Boolean, default=False)
+
+class Barista(Base):
+    __tablename__ = 'baristas'
+
+    id = Column(Integer, primary_key=True)
+    telegram_id = Column(String, unique=True, nullable=False)
+    is_admin = Column(Boolean, default=False)

@@ -1,21 +1,20 @@
 from aiogram import Router, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
-from datetime import date
-from suda_bot.models import User, DailyCode
-from suda_bot.utils import generate_numeric_code
-from suda_bot.config import BARISTA_TELEGRAM_IDS
+
+from suda_bot.models import User, Barista
+from suda_bot.utils import cleanup_old_codes_for_user, get_or_create_daily_code
 
 barista_router = Router()
 
 # --- FSM ---
-class BaristaState(StatesGroup):
-    waiting_for_action = State()  # Ожидание выбора действия (не используется)
-    waiting_for_user_info = State()  # Ожидание Фамилия 4цифры
+class BaristaStates(StatesGroup):
+    waiting_for_code_search = State()
+    waiting_for_check_discount = State()
 
 # --- Клавиатуры ---
 def barista_menu_keyboard():
@@ -26,51 +25,108 @@ def barista_menu_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
+def admin_menu_keyboard():
+    kb = [
+        [KeyboardButton(text="Выдать код")],
+        [KeyboardButton(text="Проверить баллы")],
+        [KeyboardButton(text="Добавить бариста")],
+        [KeyboardButton(text="Правила акции")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+# --- Вспомогательная функция для проверки администратора ---
+async def is_admin_barista(telegram_id: str, session: AsyncSession) -> bool:
+    barista = await session.execute(
+        select(Barista).where(Barista.telegram_id == telegram_id, Barista.is_admin == True)
+    )
+    return barista.scalar_one_or_none() is not None
+
 # --- Команды ---
 @barista_router.message(Command("start"))
-async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
-    if str(message.from_user.id) not in BARISTA_TELEGRAM_IDS:
-        await message.answer("У вас нет доступа к этой команде.")
+async def cmd_start(message: Message, session: AsyncSession):
+    is_admin = await is_admin_barista(str(message.from_user.id), session)
+
+    if is_admin:
+        await message.answer("Привет, администратор!", reply_markup=admin_menu_keyboard())
         return
 
-    await state.clear()
-    await message.answer("Привет, бариста!", reply_markup=barista_menu_keyboard())
+    barista = await session.execute(
+        select(Barista).where(Barista.telegram_id == str(message.from_user.id))
+    )
+    if barista := barista.scalar_one_or_none():
+        await message.answer("Привет, бариста!", reply_markup=barista_menu_keyboard())
+    else:
+        await message.answer("У вас нет доступа к этой команде.")
 
-# --- Обработчики кнопок ---
+@barista_router.message(Command("new_barista"))
+async def cmd_new_barista(message: Message, session: AsyncSession):
+    # Только администратор может использовать команду
+    is_admin = await is_admin_barista(str(message.from_user.id), session)
+
+    if not is_admin:
+        await message.answer("У вас нет прав для выполнения этой команды.")
+        return
+
+    await message.answer("Введите ID пользователя, которого хотите добавить как бариста (например: 123456789):")
+
+@barista_router.message(F.text.isdigit())
+async def handle_new_barista_id(message: Message, session: AsyncSession):
+    # Проверим, является ли отправитель администратором
+    is_admin = await is_admin_barista(str(message.from_user.id), session)
+
+    if not is_admin:
+        return
+
+    new_barista_id = message.text.strip()
+
+    existing_barista = await session.execute(
+        select(Barista).where(Barista.telegram_id == new_barista_id)
+    )
+    if existing_barista.scalar_one_or_none():
+        await message.answer(f"Пользователь с ID {new_barista_id} уже является бариста.")
+        return
+
+    # Добавляем нового бариста
+    new_barista = Barista(telegram_id=new_barista_id, is_admin=False)
+    session.add(new_barista)
+    await session.commit()
+
+    await message.answer(f"Пользователь с ID {new_barista_id} добавлен как бариста.")
+
+@barista_router.message(F.text == "Добавить бариста")
+async def ask_new_barista(message: Message, session: AsyncSession):
+    is_admin = await is_admin_barista(str(message.from_user.id), session)
+
+    if not is_admin:
+        await message.answer("У вас нет прав для выполнения этой команды.")
+        return
+
+    await message.answer("Введите ID пользователя, которого хотите добавить как бариста (например: 123456789):")
+
 @barista_router.message(F.text == "Выдать код")
-async def ask_for_codes_button(message: Message, state: FSMContext):
-    if str(message.from_user.id) not in BARISTA_TELEGRAM_IDS:
-        await message.answer("У вас нет доступа к этой команде.")
-        return
-
-    await state.set_state(BaristaState.waiting_for_user_info)
-    await state.update_data(action='issue_code')
+async def ask_for_codes(message: Message, state: FSMContext):
     await message.answer("Введите фамилию и последние 4 цифры телефона (например: Иванов 4567)")
+    await state.set_state(BaristaStates.waiting_for_code_search)
 
 @barista_router.message(F.text == "Проверить баллы")
-async def ask_for_check_points_button(message: Message, state: FSMContext):
-    if str(message.from_user.id) not in BARISTA_TELEGRAM_IDS:
-        await message.answer("У вас нет доступа к этой команде.")
-        return
-
-    await state.set_state(BaristaState.waiting_for_user_info)
-    await state.update_data(action='check_points')
+async def ask_for_check_discount(message: Message, state: FSMContext):
     await message.answer("Введите фамилию и последние 4 цифры телефона (например: Иванов 4567)")
+    await state.set_state(BaristaStates.waiting_for_check_discount)
 
-# --- Обработчик текста в состоянии waiting_for_user_info ---
-@barista_router.message(BaristaState.waiting_for_user_info)
-async def handle_user_info(message: Message, session: AsyncSession, state: FSMContext):
+# --- Обработка ввода после "Выдать код" ---
+@barista_router.message(BaristaStates.waiting_for_code_search, F.text.contains(" "))
+async def handle_codes_search(message: Message, session: AsyncSession, state: FSMContext):
+    await state.clear()  # Сброс состояния
+
     text = message.text.strip()
     parts = text.split()
     if len(parts) != 2:
-        await message.answer("Неверный формат. Введите: Фамилия 4цифры")
         return
 
     last_name = parts[0]
     last_4_digits = parts[1]
 
     if not last_4_digits.isdigit() or len(last_4_digits) != 4:
-        await message.answer("Последние 4 цифры должны быть числом.")
         return
 
     user = await session.execute(
@@ -83,51 +139,44 @@ async def handle_user_info(message: Message, session: AsyncSession, state: FSMCo
 
     if not user:
         await message.answer("Пользователь не найден.")
-        await state.clear()
         return
 
-    data = await state.get_data()
-    action = data.get('action', 'unknown')
+    await cleanup_old_codes_for_user(session, user.id)
 
-    if action == 'issue_code':
-        today = date.today()
+    code_entry = await get_or_create_daily_code(session, user.id)
 
-        await session.execute(
-            delete(DailyCode).where(
-                DailyCode.user_id == user.id,
-                DailyCode.date < today
-            )
+    await message.answer(f"Код для {user.first_name} {user.last_name}: `{code_entry.code}`", parse_mode="Markdown")
+
+# --- Обработка ввода после "Проверить баллы" ---
+@barista_router.message(BaristaStates.waiting_for_check_discount, F.text.contains(" "))
+async def handle_check_discount(message: Message, session: AsyncSession, state: FSMContext):
+    await state.clear()  # Сброс состояния
+
+    text = message.text.strip()
+    parts = text.split()
+    if len(parts) != 2:
+        return
+
+    last_name = parts[0]
+    last_4_digits = parts[1]
+
+    if not last_4_digits.isdigit() or len(last_4_digits) != 4:
+        return
+
+    user = await session.execute(
+        select(User).where(
+            User.last_name == last_name,
+            User.phone.like(f"%{last_4_digits}")
         )
+    )
+    user = user.scalar_one_or_none()
 
-        code_entry = await session.execute(
-            select(DailyCode).where(
-                DailyCode.user_id == user.id,
-                DailyCode.date == today
-            )
-        )
-        code_entry = code_entry.scalar_one_or_none()
+    if not user:
+        await message.answer("Пользователь не найден.")
+        return
 
-        if not code_entry:
-            code = generate_numeric_code()
-            new_code = DailyCode(
-                code=code,
-                user_id=user.id,
-                date=today
-            )
-            session.add(new_code)
-            await session.commit()
-            code_entry = new_code
-
-        await message.answer(f"Код для {user.first_name} {user.last_name}: `{code_entry.code}`", parse_mode="Markdown")
-
-    elif action == 'check_points':
-        remaining = 7 - user.points
-        await message.answer(f"У {user.first_name} {user.last_name}: {user.points}/7 очков. Осталось до бесплатного: {remaining}")
-
-    else:
-        await message.answer("Неизвестная команда.")
-
-    await state.clear()
+    remaining = 7 - user.points
+    await message.answer(f"У {user.first_name} {user.last_name}: {user.points}/7 очков. Осталось до бесплатного: {remaining}")
 
 @barista_router.message(F.text == "Правила акции")
 async def show_rules(message: Message):

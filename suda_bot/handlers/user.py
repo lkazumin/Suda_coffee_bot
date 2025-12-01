@@ -1,15 +1,17 @@
-from aiogram import Router, F, types
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import Command
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, delete
 from datetime import datetime
-from suda_bot.models import User, DailyCode
-from suda_bot.utils import generate_numeric_code
-from suda_bot.config import BARISTA_TELEGRAM_IDS, TELEGRAM_BOT_TOKEN
+
 from aiogram import Bot
+from aiogram import Router, F, types
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from suda_bot.config import TELEGRAM_BOT_TOKEN
+from suda_bot.models import User, DailyCode, Barista
+from suda_bot.utils import cleanup_old_codes_for_user, get_or_create_daily_code
 
 user_router = Router()
 
@@ -40,11 +42,33 @@ def main_menu_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
+# --- Вспомогательные функции для проверки бариста и админа ---
+async def is_admin_barista(telegram_id: str, session: AsyncSession) -> bool:
+    barista = await session.execute(
+        select(Barista).where(Barista.telegram_id == telegram_id, Barista.is_admin == True)
+    )
+    return barista.scalar_one_or_none() is not None
+
+async def is_barista(telegram_id: str, session: AsyncSession) -> bool:
+    barista = await session.execute(select(Barista).where(Barista.telegram_id == telegram_id))
+    return barista.scalar_one_or_none() is not None
+
 # --- Команды ---
 @user_router.message(Command("start"))
 async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
-    # Проверяем, бариста ли это
-    if str(message.from_user.id) in BARISTA_TELEGRAM_IDS:
+    # Проверяем, администратор ли это (приоритетнее)
+    is_user_admin = await is_admin_barista(str(message.from_user.id), session)
+
+    if is_user_admin:
+        # Перенаправляем в бариста, там уже будет админ-меню
+        from suda_bot.handlers.barista import admin_menu_keyboard
+        await message.answer("Привет, администратор!", reply_markup=admin_menu_keyboard())
+        return
+
+    # Проверяем, бариста ли это (но не админ)
+    is_user_barista = await is_barista(str(message.from_user.id), session)
+
+    if is_user_barista:
         # Перенаправляем в бариста
         from suda_bot.handlers.barista import barista_menu_keyboard
         await message.answer("Привет, бариста!", reply_markup=barista_menu_keyboard())
@@ -58,7 +82,6 @@ async def cmd_start(message: Message, session: AsyncSession, state: FSMContext):
         await message.answer("Добро пожаловать в кофейню “Сюда”! ☕️", reply_markup=main_menu_keyboard())
         return
 
-    # Отправляем приветствие с inline-кнопкой
     await message.answer(
         "Добро пожаловать в кофейню “Сюда”! ☕️\n\n"
         "За каждые 7 посещений вы можете получить 8-й напиток в подарок!\n"
@@ -101,7 +124,6 @@ async def process_last_name(message: Message, state: FSMContext):
 async def process_phone_from_contact(message: Message, session: AsyncSession, state: FSMContext):
     contact = message.contact
 
-    # Проверяем, что контакт принадлежит пользователю
     if contact.user_id != message.from_user.id:
         await message.answer("Пожалуйста, отправьте свой номер.")
         return
@@ -112,7 +134,6 @@ async def process_phone_from_contact(message: Message, session: AsyncSession, st
         await message.answer("Неверный формат номера. Попробуйте снова.")
         return
 
-    # Приводим к 11-значному формату
     if phone.startswith('8') and len(phone) == 11:
         phone = '7' + phone[1:]
     elif phone.startswith('7') and len(phone) == 11:
@@ -139,7 +160,7 @@ async def process_phone_from_contact(message: Message, session: AsyncSession, st
     await state.clear()
 
     await message.answer(
-        "Регистрация завершена!",
+        "✅ Регистрация завершена!",
         reply_markup=main_menu_keyboard()
     )
 
@@ -156,40 +177,21 @@ async def request_code(message: Message, session: AsyncSession):
         await message.answer("Сначала зарегистрируйтесь используя /start")
         return
 
-    today = datetime.now().date()
+    is_user_barista = await is_barista(str(message.from_user.id), session)
+    if is_user_barista:
+        await message.answer("Вы бариста — используйте кнопки", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
+        return
 
-    # Удаляем старые коды
-    await session.execute(
-        delete(DailyCode).where(
-            DailyCode.user_id == user.id,
-            DailyCode.date < today
-        )
-    )
+    await cleanup_old_codes_for_user(session, user.id)
 
-    # Ищем код на сегодня
-    code_entry = await session.execute(
-        select(DailyCode).where(
-            DailyCode.user_id == user.id,
-            DailyCode.date == today
-        )
-    )
-    code_entry = code_entry.scalar_one_or_none()
-
-    if not code_entry:
-        code = generate_numeric_code()
-        new_code = DailyCode(
-            code=code,
-            user_id=user.id,
-            date=today,
-            is_used=False
-        )
-        session.add(new_code)
-        await session.commit()
-        code_entry = new_code
+    code_entry = await get_or_create_daily_code(session, user.id)
 
     # Отправляем бариста сообщение
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    for barista_id in BARISTA_TELEGRAM_IDS:
+    baristas = await session.execute(select(Barista.telegram_id))
+    barista_ids = [b[0] for b in baristas.fetchall()]
+
+    for barista_id in barista_ids:
         try:
             await bot.send_message(
                 chat_id=barista_id,
@@ -223,7 +225,7 @@ async def show_rules(message: Message):
     )
 
 # --- Обработка ввода кода от клиента ---
-@user_router.message(F.text.regexp(r"^\d{6}$"))  # Только 6-значные цифры
+@user_router.message(F.text.regexp(r"^\d{6}$"))
 async def handle_code_from_client(message: Message, session: AsyncSession):
     code = message.text.strip()
 
@@ -234,7 +236,8 @@ async def handle_code_from_client(message: Message, session: AsyncSession):
         await message.answer("Пожалуйста, сначала зарегистрируйтесь используя /start")
         return
 
-    if str(message.from_user.id) in BARISTA_TELEGRAM_IDS:
+    is_user_barista = await is_barista(str(message.from_user.id), session)
+    if is_user_barista:
         await message.answer("Вы бариста — используйте кнопки", reply_markup=ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True))
         return
 
@@ -258,7 +261,6 @@ async def handle_code_from_client(message: Message, session: AsyncSession):
         await message.answer("Этот код не принадлежит вам")
         return
 
-    # Помечаем код как использованный
     stmt = (
         update(DailyCode)
         .where(DailyCode.id == db_code.id)
@@ -266,7 +268,6 @@ async def handle_code_from_client(message: Message, session: AsyncSession):
     )
     await session.execute(stmt)
 
-    # Обновляем пользователя
     stmt_user = (
         update(User)
         .where(User.telegram_id == str(message.from_user.id))
@@ -278,14 +279,12 @@ async def handle_code_from_client(message: Message, session: AsyncSession):
     await session.execute(stmt_user)
     await session.commit()
 
-    # Проверяем, набрал ли 7 очков
     updated_user = await session.execute(select(User).where(User.telegram_id == str(message.from_user.id)))
     updated_user = updated_user.scalar_one()
     remaining = 7 - updated_user.points
 
     if remaining <= 0:
         await message.answer("Поздравляем! Вы получаете бесплатный напиток!")
-        # Сброс
         stmt_reset = (
             update(User)
             .where(User.telegram_id == str(message.from_user.id))
