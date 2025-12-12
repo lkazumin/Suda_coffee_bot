@@ -22,7 +22,6 @@ async def cleanup_old_codes_for_user(session: AsyncSession, user_id: int):
         )
     )
 
-
 async def get_or_create_daily_code(session: AsyncSession, user_id: int) -> DailyCode:
     """Возвращает существующий или создает новый код на сегодня для пользователя"""
     today = datetime.now().date()
